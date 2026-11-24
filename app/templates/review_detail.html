@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block title %}回查 #{{ review.id }}{% endblock %}
+{% block content %}
+<section class="card review-head">
+  <div class="card-head">
+    <div>
+      <p class="eyebrow">回查记录 #{{ review.id }}</p>
+      <h1>站 {{ review.station }} · {{ review.period_start_utc|dt }} → {{ review.period_end_utc|dt }}</h1>
+      <p class="hint">
+        警戒水位 <b>{{ review.threshold_cm|cm }} cm</b> ·
+        提交于 <span class="mono">{{ review.created_utc|dt }}</span> ·
+        快照含 {{ review.forecast_count }} 条预报报文、{{ review.observation_count }} 条实测
+        {% if review.note %} · {{ review.note }}{% endif %}
+      </p>
+    </div>
+    <div class="head-actions">
+      <a class="btn ghost" href="{{ url_for('review_export', review_id=review.id) }}">导出 CSV</a>
+      <a class="btn ghost" href="{{ url_for('reviews') }}">返回列表</a>
+    </div>
+  </div>
+  <div class="stats">
+    <div class="stat"><span class="stat-num">{{ crossing_count }}</span><span class="stat-label">越线整点</span></div>
+    <div class="stat ok"><span class="stat-num">{{ valid_count }}</span><span class="stat-label">有持续有效预警</span></div>
+    <div class="stat bad"><span class="stat-num">{{ crossing_count - valid_count }}</span><span class="stat-label">无有效预警</span></div>
+    <div class="stat warn"><span class="stat-num">{{ pending_count }}</span><span class="stat-label">待核（上小时缺测）</span></div>
+  </div>
+  <p class="snapshot-note">
+    本次结果来自提交时冻结的快照。回查期间可以继续补档；补档只影响之后新建的回查，不改变本页数字。
+    补档后需要新结论时，重新发起一次同时段回查即可。
+  </p>
+</section>
+
+<section class="card">
+  <h2>越线清单与预警提前量</h2>
+  {% if review.results %}
+    <div class="table-wrap">
+    <table class="table results">
+      <thead>
+        <tr>
+          <th>越线整点（UTC）</th>
+          <th>判定</th>
+          <th class="num">上一小时<br>实测</th>
+          <th class="num">本小时<br>实测</th>
+          <th>持续有效预警</th>
+          <th>起报接收时刻（UTC）</th>
+          <th class="num">提前<br>分钟</th>
+          <th class="num">越线前<br>最新预报</th>
+          <th>说明</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in review.results %}
+          <tr class="{{ 'row-pending' if row.status == 'pending' else ('row-ok' if row.warning_valid else 'row-none') }}">
+            <td class="mono strong">{{ row.hour_utc|dt }}</td>
+            <td>
+              {% if row.status == 'crossing' %}
+                <span class="badge badge-cross">越线</span>
+              {% else %}
+                <span class="badge badge-pending">待核</span>
+              {% endif %}
+            </td>
+            <td class="num">
+              {% if row.prev_level_cm is none %}
+                <span class="muted">缺测</span>
+              {% else %}
+                {{ row.prev_level_cm|cm }}
+              {% endif %}
+            </td>
+            <td class="num strong">{{ row.obs_level_cm|cm }}</td>
+            <td>
+              {% if row.status == 'pending' %}
+                <span class="muted">待核，不计算</span>
+              {% elif row.warning_valid %}
+                <span class="badge badge-ok">有</span>
+              {% else %}
+                <span class="badge badge-none">无</span>
+              {% endif %}
+            </td>
+            <td class="mono">
+              {% if row.start_received_utc %}
+                {{ row.start_received_utc|dt }}
+                <div class="sub">签发 {{ row.start_issued_utc|dt }}</div>
+              {% else %}
+                <span class="muted">—</span>
+              {% endif %}
+            </td>
+            <td class="num strong">
+              {% if row.lead_minutes is not none %}{{ row.lead_minutes }}{% else %}<span class="muted">—</span>{% endif %}
+            </td>
+            <td class="num">
+              {% if row.authority_level_cm is not none %}
+                {{ row.authority_level_cm|cm }}
+                <div class="sub">{{ row.authority_received_utc|dt }}</div>
+              {% else %}
+                <span class="muted">无报文</span>
+              {% endif %}
+            </td>
+            <td class="reason">
+              {{ row.reason }}
+              {% if row.status == 'crossing' and row.warning_valid %}
+                <div class="sub">提前 {{ row.lead_minutes }} 分钟</div>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  {% else %}
+    <p class="empty">该时段内没有发生"由线下升到线上"的越线整点。</p>
+  {% endif %}
+</section>
+
+{% if traces %}
+<section class="card">
+  <h2>逐时预警生效过程</h2>
+  <p class="hint">只展示目标为该越线整点、且在越线整点前已接收的报文。值班端始终以"当时已收到的最新签发"为准。</p>
+  <div class="traces">
+    {% for hour, items in traces.items() %}{% if loop.index <= 40 %}
+      <details class="trace">
+        <summary class="mono">{{ hour|dt }} <span class="muted">（{{ items|length }} 条已接收报文）</span></summary>
+        <ol class="timeline">
+          {% for item in items %}
+            <li class="{{ 'active' if item.active else 'inactive' }} {{ 'ignored' if not item.effective }}">
+              <span class="mono t-recv">{{ item.message.received_utc|dt }}</span>
+              <span class="tag">收到</span>
+              <span class="mono">签发 {{ item.message.issued_utc|dt }}</span>
+              <span class="level">{{ item.message.level_cm|cm }} cm</span>
+              <span class="t-note">{{ item.note }}</span>
+            </li>
+          {% endfor %}
+        </ol>
+      </details>
+    {% endif %}{% endfor %}
+  </div>
+  {% if trace_total > trace_limit %}
+    <p class="hint">共 {{ trace_total }} 个越线整点，这里只展开前 {{ trace_limit }} 个的过程；完整数据见上方清单与导出的 CSV。</p>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>本次快照使用的报文</h2>
+  {% if review.messages %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>目标整点</th><th>签发时刻</th><th>接收时刻</th><th class="num">潮位</th><th>是否参与</th></tr></thead>
+        <tbody>
+          {% for m in review.messages %}
+            <tr>
+              <td class="mono">{{ m.target_utc|dt }}</td>
+              <td class="mono">{{ m.issued_utc|dt }}</td>
+              <td class="mono">{{ m.received_utc|dt }}</td>
+              <td class="num">{{ m.level_cm|cm }}</td>
+              <td class="hint">{{ '越线前已收到' if m.received_utc <= m.target_utc else '越线后才收到，不计入' }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="empty">快照中没有目标为这些越线整点的预报报文。</p>
+  {% endif %}
+</section>
+{% endblock %}

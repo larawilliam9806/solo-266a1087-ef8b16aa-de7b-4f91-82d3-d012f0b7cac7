@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid two">
+  <section class="card">
+    <h1>按批上传单站资料</h1>
+    <p class="hint">
+      选择同一个站，一次可同时上传预报与实测 CSV；两表一起校验，全部通过后在同一事务里一起生效。
+      也可以是已建档的站号，或新填一个站号建档。
+    </p>
+    <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data" class="form">
+      <div class="field">
+        <label for="station">已建档站号</label>
+        <select id="station" name="station">
+          <option value="">— 选择站号 —</option>
+          {% for s in stations %}
+            <option value="{{ s.code }}">{{ s.code }}{% if s.name %} · {{ s.name }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="new_station">或新建站号</label>
+        <input id="new_station" name="new_station" type="text" placeholder="例如 STN01" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="forecast_file">预报 CSV</label>
+        <input id="forecast_file" name="forecast_file" type="file" accept=".csv,text/csv">
+        <p class="hint">列：目标整点、签发时刻、接收时刻、潮位（cm）。同一目标整点的签发时刻唯一。</p>
+      </div>
+      <div class="field">
+        <label for="observation_file">实测 CSV</label>
+        <input id="observation_file" name="observation_file" type="file" accept=".csv,text/csv">
+        <p class="hint">列：整点、潮位（cm）。同一整点可重复上传作订正，以最新一次为准。</p>
+      </div>
+      <button type="submit" class="btn primary">校验并入库</button>
+    </form>
+    <details class="examples">
+      <summary>CSV 表头示例</summary>
+      <pre>目标整点,签发时刻,接收时刻,潮位
+2026-05-01 05:00,2026-04-30 20:00,2026-04-30 20:04,182
+2026-05-01 05:00,2026-04-30 23:30,2026-04-30 23:33,195
+
+整点,潮位
+2026-05-01 04:00,148
+2026-05-01 05:00,186</pre>
+      <p class="hint">
+        时刻可写 <code>YYYY-MM-DD HH:MM</code> 或紧凑的 <code>YYYYMMDDHHMM</code>；
+        支持 <code>Z</code> / <code>+00:00</code> 结尾（其它时区偏移会被拒绝）；
+        支持逗号、分号、制表符分隔。
+      </p>
+    </details>
+  </section>
+
+  <section class="card">
+    <h1>发起回查</h1>
+    <form method="post" action="{{ url_for('create_review') }}" class="form">
+      <div class="field">
+        <label for="r_station">站号</label>
+        <select id="r_station" name="station" required>
+          {% for s in stations %}
+            <option value="{{ s.code }}" {{ 'selected' if s.code == defaults.station }}>{{ s.code }}</option>
+          {% endfor %}
+          {% if not stations %}<option value="">（先上传资料）</option>{% endif %}
+        </select>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="period_start">时段起（UTC 整点）</label>
+          <input id="period_start" name="period_start" type="datetime-local" step="3600"
+                 value="{{ defaults.start }}" required>
+        </div>
+        <div class="field">
+          <label for="period_end">时段止（UTC 整点）</label>
+          <input id="period_end" name="period_end" type="datetime-local" step="3600"
+                 value="{{ defaults.end }}" required>
+        </div>
+      </div>
+      <div class="field">
+        <label for="threshold_cm">警戒水位（cm）</label>
+        <input id="threshold_cm" name="threshold_cm" type="number" step="0.1" inputmode="decimal"
+               placeholder="例如 180" value="{{ defaults.threshold }}" required>
+      </div>
+      <div class="field">
+        <label for="note">备注（可选）</label>
+        <input id="note" name="note" type="text" maxlength="500" placeholder="例如：5 月 1 日强潮过程复盘">
+      </div>
+      <button type="submit" class="btn" {{ 'disabled' if not stations }}>锁定快照并计算</button>
+      <p class="hint">
+        越线判定：上一小时低于警戒、本小时达到或高于警戒。若本小时达线但上一小时缺测，记为<b>待核</b>。
+        回查只读取目标为这些越线整点的预报报文；提交后即使补档，本次结果也不再改变。
+      </p>
+    </form>
+  </section>
+</div>
+
+<section class="card">
+  <div class="card-head">
+    <h2>最近回查</h2>
+    <a class="link" href="{{ url_for('reviews') }}">全部记录 →</a>
+  </div>
+  {% if recent %}
+    <table class="table">
+      <thead>
+        <tr><th>#</th><th>站号</th><th>时段（UTC）</th><th class="num">警戒</th><th class="num">越线</th><th class="num">已提交</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for r in recent %}
+          <tr>
+            <td>{{ r.id }}</td>
+            <td>{{ r.station }}</td>
+            <td class="mono">{{ r.period_start_utc|dt }} → {{ r.period_end_utc|dt }}</td>
+            <td class="num">{{ r.threshold_cm|cm }} cm</td>
+            <td class="num">{{ r.crossing_rows }}</td>
+            <td class="num mono">{{ r.created_utc|dt }}</td>
+            <td><a class="link" href="{{ url_for('review_detail', review_id=r.id) }}">查看</a></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">还没有回查记录。先上传单站预报与实测，再发起一次回查。</p>
+  {% endif %}
+</section>
+{% endblock %}

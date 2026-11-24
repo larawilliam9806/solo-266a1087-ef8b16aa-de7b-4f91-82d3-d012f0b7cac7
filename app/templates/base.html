@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}潮位越线回查{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="{{ url_for('index') }}">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span class="brand-text">潮位越线回查<small>港口值班复盘</small></span>
+  </a>
+  <nav>
+    <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint == 'index' }}">上传 / 发起回查</a>
+    <a href="{{ url_for('reviews') }}" class="{{ 'active' if request.endpoint in ('reviews', 'review_detail') }}">回查记录</a>
+    <a href="{{ url_for('data_browser') }}" class="{{ 'active' if request.endpoint == 'data_browser' }}">资料库</a>
+  </nav>
+  <span class="clock" title="当前 UTC 时间">{{ now_utc }}</span>
+</header>
+
+<main class="page">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flashes">
+        {% for category, message in messages %}
+          <div class="flash flash-{{ 'ok' if category == 'success' else 'bad' }}{% if category == 'error-detail' %} flash-detail{% endif %}">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="footer">
+  所有时刻均为 UTC，潮位单位厘米。回查结果按提交时的资料快照冻结，补档不影响已提交回查。
+</footer>
+</body>
+</html>

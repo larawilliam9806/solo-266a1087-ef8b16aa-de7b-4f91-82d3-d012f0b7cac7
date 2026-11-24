@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}回查记录{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="card-head">
+    <h1>回查记录</h1>
+    <a class="btn" href="{{ url_for('index') }}">新建回查</a>
+  </div>
+  {% if reviews %}
+    <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>#</th><th>站号</th><th>时段（UTC）</th><th class="num">警戒</th>
+          <th class="num">越线</th><th class="num">有预警</th><th class="num">无预警</th>
+          <th class="num">待核</th><th>提交时刻</th><th>备注</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in reviews %}
+          <tr>
+            <td class="mono">{{ r.id }}</td>
+            <td class="strong">{{ r.station }}</td>
+            <td class="mono">{{ r.period_start_utc|dt }} → {{ r.period_end_utc|dt }}</td>
+            <td class="num">{{ r.threshold_cm|cm }}</td>
+            <td class="num">{{ r.crossing_rows }}</td>
+            <td class="num ok-text">{{ r.valid_rows }}</td>
+            <td class="num {{ 'bad-text' if r.crossing_rows - r.valid_rows else '' }}">{{ r.crossing_rows - r.valid_rows }}</td>
+            <td class="num">{{ r.pending_rows }}</td>
+            <td class="mono">{{ r.created_utc|dt }}</td>
+            <td class="muted">{{ r.note or '—' }}</td>
+            <td><a class="link" href="{{ url_for('review_detail', review_id=r.id) }}">查看</a></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  {% else %}
+    <p class="empty">还没有回查记录。</p>
+  {% endif %}
+</section>
+{% endblock %}

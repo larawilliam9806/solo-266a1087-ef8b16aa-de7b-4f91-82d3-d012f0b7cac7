@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}上传未通过{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>上传未通过校验，未写入数据库</h1>
+  <p class="hint">整批资料作为一个事务处理：只要有任意一行不合法，预报与实测都不会生效。修正后请重新上传。</p>
+  <p class="error-summary">{{ message }}</p>
+  {% if errors %}
+    <ul class="error-list">
+      {% for e in errors %}<li class="mono">{{ e }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+  <a class="btn" href="{{ url_for('index') }}">返回上传</a>
+</section>
+{% endblock %}

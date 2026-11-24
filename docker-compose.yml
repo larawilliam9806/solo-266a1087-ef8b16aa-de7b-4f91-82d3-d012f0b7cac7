@@ -1,0 +1,19 @@
+services:
+  tide-review:
+    build: .
+    image: tide-review:latest
+    container_name: tide-review
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      # Change this before exposing the service beyond localhost.
+      SECRET_KEY: "${SECRET_KEY:-please-change-this-secret-key}"
+      DATABASE_PATH: /data/tide.db
+      TZ: UTC
+    volumes:
+      # SQLite lives on a named volume so it survives `docker compose down`.
+      - tide-data:/data
+    restart: unless-stopped
+
+volumes:
+  tide-data:

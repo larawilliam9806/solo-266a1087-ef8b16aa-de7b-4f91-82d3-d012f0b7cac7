@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}资料库{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="card-head">
+    <h1>资料库</h1>
+    <form method="get" class="inline-form">
+      <label for="station" class="sr-only">站号</label>
+      <select id="station" name="station" onchange="this.form.submit()">
+        {% for s in stations %}
+          <option value="{{ s.code }}" {{ 'selected' if s.code == station }}>{{ s.code }}</option>
+        {% endfor %}
+      </select>
+    </form>
+  </div>
+  {% if not stations %}
+    <p class="empty">还没有资料，先去<a class="link" href="{{ url_for('index') }}">上传</a>。</p>
+  {% else %}
+    <div class="grid two">
+      <div>
+        <h2>预报报文 <span class="muted">（按目标整点倒序）</span></h2>
+        <div class="table-wrap tall">
+          <table class="table compact">
+            <thead><tr><th>目标整点</th><th>签发</th><th>接收</th><th class="num">潮位</th></tr></thead>
+            <tbody>
+              {% for f in forecasts %}
+                <tr>
+                  <td class="mono">{{ f.target_utc|dt }}</td>
+                  <td class="mono">{{ f.issued_utc|dt }}</td>
+                  <td class="mono">{{ f.received_utc|dt }}</td>
+                  <td class="num">{{ f.level_cm|cm }}</td>
+                </tr>
+              {% else %}
+                <tr><td colspan="4" class="empty">暂无预报</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <h2>实测 <span class="muted">（按整点倒序，订正后覆盖）</span></h2>
+        <div class="table-wrap tall">
+          <table class="table compact">
+            <thead><tr><th>整点</th><th class="num">潮位</th><th>更新时刻</th></tr></thead>
+            <tbody>
+              {% for o in observations %}
+                <tr>
+                  <td class="mono">{{ o.hour_utc|dt }}</td>
+                  <td class="num">{{ o.level_cm|cm }}</td>
+                  <td class="mono muted">{{ o.updated_utc|dt }}</td>
+                </tr>
+              {% else %}
+                <tr><td colspan="3" class="empty">暂无实测</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+</section>
+{% endblock %}
