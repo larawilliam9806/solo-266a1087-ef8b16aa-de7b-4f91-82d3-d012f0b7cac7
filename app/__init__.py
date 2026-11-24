@@ -6,6 +6,7 @@ import csv
 import io
 import math
 import os
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from flask import (
 
 from . import db, ingest, review as review_mod, times
 
-TRACE_LIMIT = 40
+MESSAGES_PAGE_SIZE = 100
 
 
 def create_app(test_config: dict | None = None) -> Flask:
@@ -213,37 +214,113 @@ def create_app(test_config: dict | None = None) -> Flask:
     @app.get("/reviews/<int:review_id>")
     def review_detail(review_id: int):
         conn = get_conn()
-        data = review_mod.load_review(conn, review_id)
+        # The detail page shows the crossing results first; snapshot messages
+        # are only read on demand via the paged browser.
+        data = review_mod.load_review_summary(conn, review_id)
         if data is None:
             return render_template("not_found.html", what="回查记录"), 404
         crossing_rows = [row for row in data["results"] if row["status"] == "crossing"]
-        # Long reviews would produce thousands of timelines; render the first 40
-        # and point at the export for the rest.
-        traces = {
-            row["hour_utc"]: review_mod.trace_for_hour(
-                data, row["hour_utc"], data["threshold_cm"]
-            )
-            for row in crossing_rows[:TRACE_LIMIT]
-        }
-        crossing_count = sum(1 for row in data["results"] if row["status"] == "crossing")
-        valid_count = sum(
-            1 for row in data["results"] if row["status"] == "crossing" and row["warning_valid"]
-        )
+        message_targets = {}
+        if data["messages_ready"]:
+            message_targets = {
+                row["target_utc"]: row
+                for row in conn.execute(
+                    "SELECT target_utc, message_count, counted_count "
+                    "FROM review_message_targets WHERE review_id = ?",
+                    (review_id,),
+                ).fetchall()
+            }
+        crossing_count = len(crossing_rows)
+        valid_count = sum(1 for row in crossing_rows if row["warning_valid"])
         pending_count = sum(1 for row in data["results"] if row["status"] == "pending")
         return render_template(
             "review_detail.html",
             review=data,
-            traces=traces,
-            trace_limit=TRACE_LIMIT,
-            trace_total=len(crossing_rows),
+            crossing_hours=[row["hour_utc"] for row in crossing_rows],
+            message_targets=message_targets,
             crossing_count=crossing_count,
             valid_count=valid_count,
             pending_count=pending_count,
         )
 
+    @app.get("/reviews/<int:review_id>/messages")
+    def review_messages(review_id: int):
+        conn = get_conn()
+        review = conn.execute("SELECT * FROM reviews WHERE id = ?", (review_id,)).fetchone()
+        if review is None:
+            return render_template("not_found.html", what="回查记录"), 404
+        hour_raw = (request.args.get("hour") or "").strip()
+        try:
+            hour = times.fmt(times.require_whole_hour(hour_raw, "越线整点"))
+        except ValueError:
+            flash("请先在详情页选择一个越线整点，再查看报文。", "error")
+            return redirect(url_for("review_detail", review_id=review_id))
+        result_row = conn.execute(
+            "SELECT status FROM review_results WHERE review_id = ? AND hour_utc = ?",
+            (review_id, hour),
+        ).fetchone()
+        if result_row is None or result_row["status"] != "crossing":
+            flash(f"{times.display(hour)} 不是本次回查的越线整点，没有可查看的报文。", "error")
+            return redirect(url_for("review_detail", review_id=review_id))
+        if not review["messages_ready"]:
+            flash("该回查还没有报文跳查索引，请先在详情页从快照补建。", "error")
+            return redirect(url_for("review_detail", review_id=review_id))
+
+        from_seq = None
+        anchor_seq = None
+        start_utc = None
+        seq_raw = (request.args.get("seq") or "").strip()
+        anchor_raw = (request.args.get("anchor") or "").strip()
+        start_raw = (request.args.get("start") or "").strip()
+        try:
+            if seq_raw:
+                from_seq = max(1, int(seq_raw))
+                if anchor_raw:
+                    anchor_seq = max(1, int(anchor_raw))
+            elif start_raw:
+                start_utc = times.fmt(times.parse_utc(start_raw))
+        except ValueError:
+            flash(
+                f"接收起点无法识别：{start_raw or seq_raw!r}"
+                "（可填如 2026-05-01 08:00:00 的 UTC 时刻）",
+                "error",
+            )
+            return redirect(url_for("review_detail", review_id=review_id))
+        page = review_mod.message_page(
+            conn,
+            review_id,
+            hour,
+            start_received_utc=start_utc,
+            from_seq=from_seq,
+            anchor_seq=anchor_seq,
+            limit=MESSAGES_PAGE_SIZE,
+        )
+        return render_template(
+            "review_messages.html",
+            review=review,
+            hour=hour,
+            page=page,
+            start_utc=start_utc,
+            page_size=MESSAGES_PAGE_SIZE,
+        )
+
+    @app.post("/reviews/<int:review_id>/rebuild-messages")
+    def review_rebuild_messages(review_id: int):
+        conn = get_conn()
+        try:
+            total = review_mod.rebuild_message_index(conn, review_id)
+        except sqlite3.Error:
+            app.logger.exception("报文索引补建失败：回查 #%s", review_id)
+            flash("报文索引补建失败，请重试。越线结果与 CSV 导出不受影响。", "error")
+            return redirect(url_for("review_detail", review_id=review_id))
+        if total is None:
+            return render_template("not_found.html", what="回查记录"), 404
+        flash(f"报文索引已补建（{total} 条报文），现在可以按越线整点跳查报文。", "success")
+        return redirect(url_for("review_detail", review_id=review_id))
+
     @app.get("/reviews/<int:review_id>/export.csv")
     def review_export(review_id: int):
-        data = review_mod.load_review(get_conn(), review_id)
+        data = review_mod.load_review_summary(get_conn(), review_id)
         if data is None:
             return render_template("not_found.html", what="回查记录"), 404
         buffer = io.StringIO()

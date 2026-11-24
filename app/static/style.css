@@ -236,6 +236,21 @@ tr.row-pending:hover { background: rgba(226,176,79,0.2); }
 .timeline .level { font-family: var(--mono); font-weight: 600; }
 .timeline .t-note { color: var(--ink-dim); margin-left: auto; }
 
+.state-box {
+  margin: 2px 0 14px; padding: 12px 16px; border-radius: 10px;
+  background: rgba(79, 179, 217, 0.07); border: 1px solid rgba(79, 179, 217, 0.2);
+  display: flex; flex-direction: column; gap: 5px; font-size: 13px;
+}
+.state-box .state-line { display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+.state-box .state-label {
+  color: var(--ink-faint); font-size: 11.6px; letter-spacing: 0.04em;
+  min-width: 150px; flex-shrink: 0;
+}
+.pager { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.pager .pager-pos { color: var(--ink-dim); font-size: 12.6px; margin-right: auto; font-variant-numeric: tabular-nums; }
+tr.row-late td { color: var(--ink-faint); }
+tr.row-ignored td { opacity: 0.6; }
+
 .empty { color: var(--ink-faint); font-size: 13.5px; padding: 14px 2px; }
 .error-summary { color: #f08a82; font-weight: 600; }
 .error-list { color: var(--ink-dim); font-size: 12.4px; padding-left: 20px; }

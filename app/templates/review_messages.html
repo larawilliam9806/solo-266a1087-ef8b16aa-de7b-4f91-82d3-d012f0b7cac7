@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}报文跳查 · 回查 #{{ review.id }}{% endblock %}
+{% block content %}
+<section class="card review-head">
+  <div class="card-head">
+    <div>
+      <p class="eyebrow">回查记录 #{{ review.id }} · 报文跳查</p>
+      <h1>站 {{ review.station }} · 越线整点 {{ hour|dt }}</h1>
+      <p class="hint">
+        警戒水位 <b>{{ review.threshold_cm|cm }} cm</b> ·
+        快照中目标为该整点的报文共 <b>{{ page.total }}</b> 条（越线前到报 {{ page.counted }} 条）·
+        按接收时刻升序，同秒较新签发在前，每页最多 {{ page_size }} 条
+        {% if start_utc %} · 接收起点 <span class="mono">{{ start_utc|dt }}</span>{% endif %}
+      </p>
+    </div>
+    <div class="head-actions">
+      <a class="btn ghost" href="{{ url_for('review_detail', review_id=review.id) }}">返回回查</a>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>逐条报文与计时影响</h2>
+  {% if page.rows %}
+    <div class="state-box">
+      {% if page.before is none %}
+        <div class="state-line">
+          <span class="state-label">页首状态</span>
+          <span>本页从首条报文开始：此前没有已接收报文，预警尚未开始计时。</span>
+        </div>
+      {% else %}
+        {% if page.before.best_issued_utc %}
+          <div class="state-line">
+            <span class="state-label">首条报文处理前最新生效</span>
+            <span>
+              签发 <span class="mono">{{ page.before.best_issued_utc|dt }}</span> ·
+              接收 <span class="mono">{{ page.before.best_received_utc|dt }}</span> ·
+              潮位 <b>{{ page.before.best_level_cm|cm }} cm</b>
+            </span>
+          </div>
+        {% else %}
+          <div class="state-line">
+            <span class="state-label">首条报文处理前</span>
+            <span>越线前未收到目标为该整点的报文。</span>
+          </div>
+        {% endif %}
+        <div class="state-line">
+          <span class="state-label">预警计时</span>
+          {% if page.before.active and page.before.timer_start_received_utc %}
+            <span>仍有有效预警，自 <span class="mono strong">{{ page.before.timer_start_received_utc|dt }}</span> 起计时</span>
+          {% else %}
+            <span>当前没有仍在计时的预警</span>
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>#</th><th>接收时刻（UTC）</th><th>签发时刻（UTC）</th>
+            <th class="num">潮位</th><th>计时影响</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in page.rows %}
+            <tr class="{{ 'row-late' if not m.counted else ('' if m.effective else 'row-ignored') }}">
+              <td class="mono muted">{{ m.seq }}</td>
+              <td class="mono">{{ m.received_utc|dt }}</td>
+              <td class="mono">{{ m.issued_utc|dt }}</td>
+              <td class="num">{{ m.level_cm|cm }}</td>
+              <td>
+                {% if not m.counted %}<span class="badge badge-pending">不计入</span>{% endif %}
+                <span class="{{ 'muted' if not m.effective }}">{{ m.note }}</span>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <span class="pager-pos">第 {{ page.first_seq }}–{{ page.last_seq }} 条 / 共 {{ page.total }} 条</span>
+      {% if page.prev_seq %}
+        <a class="btn ghost" href="{{ url_for('review_messages', review_id=review.id, hour=hour, seq=page.prev_seq, anchor=page.anchor_seq) }}">← 上一页</a>
+      {% endif %}
+      {% if page.next_seq %}
+        <a class="btn primary" href="{{ url_for('review_messages', review_id=review.id, hour=hour, seq=page.next_seq, anchor=page.anchor_seq) }}">下一页 →</a>
+      {% endif %}
+    </div>
+  {% else %}
+    {% if page.start_beyond %}
+      <p class="empty">接收起点之后没有报文。该整点最后一条报文早于所填起点。</p>
+    {% elif page.total == 0 %}
+      <p class="empty">快照中没有目标为该整点的预报报文。</p>
+    {% else %}
+      <p class="empty">该页没有报文。</p>
+    {% endif %}
+    <div class="pager">
+      <span class="pager-pos">共 {{ page.total }} 条</span>
+      {% if page.total %}
+        <a class="btn ghost" href="{{ url_for('review_messages', review_id=review.id, hour=hour) }}">从首条开始查看</a>
+      {% endif %}
+    </div>
+  {% endif %}
+  <p class="hint">
+    迟到的旧签发标为「忽略」；越线整点后才收到的报文标为「不计入」，不影响计时。
+    页首状态与每条报文的计时影响，均与从首条开始逐条查看一致。
+  </p>
+</section>
+{% endblock %}

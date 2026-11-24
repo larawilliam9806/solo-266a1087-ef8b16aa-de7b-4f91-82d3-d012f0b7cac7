@@ -116,10 +116,11 @@ def evaluate_warning(
     ]
     late = sum(1 for m in messages if m.target_utc == target_utc and m.received > cutoff)
 
-    # Order by reception.  Within the same reception instant, the larger issued
-    # time is considered first; the "best" message is the largest issued time
-    # among everything received so far, which is what the watch desk uses.
-    relevant.sort(key=lambda m: (m.received, m.issued, m.target_utc))
+    # Order by reception.  Within the same reception instant the newer issue
+    # is considered first — the same canonical order the paged timeline uses —
+    # and the "best" message is the largest issued time among everything
+    # received so far, which is what the watch desk uses.
+    relevant.sort(key=lambda m: (m.received, -_seconds_since_epoch(m.issued)))
     best: Message | None = None
     start: Message | None = None
     valid = False
@@ -314,10 +315,102 @@ def create_review(
                     item.messages_late,
                 ),
             )
+        # The paged-browsing index commits in the same transaction, so a new
+        # review never appears in the list before its messages can be jumped.
+        build_message_index(conn, review_id, messages, threshold_cm)
+        conn.execute(
+            "UPDATE reviews SET messages_ready = 1 WHERE id = ?", (review_id,)
+        )
     return review_id
 
 
-def load_review(conn, review_id: int) -> dict | None:
+def build_message_index(
+    conn,
+    review_id: int,
+    messages: list[Message],
+    threshold_cm: float,
+) -> int:
+    """Materialise the per-target timeline used by paged message browsing.
+
+    Rows are numbered 1..N per target hour in canonical reception order, so a
+    page and the state right before it are both fetched with indexed seeks.
+    Returns the number of indexed messages.
+    """
+    by_target: dict[str, list[Message]] = {}
+    for message in messages:
+        by_target.setdefault(message.target_utc, []).append(message)
+    total = 0
+    for target_utc, group in by_target.items():
+        cutoff = times.parse_stored(target_utc)
+        entries = timeline_effects(group, threshold_cm, cutoff)
+        counted_count = 0
+        for seq, entry in enumerate(entries, start=1):
+            message = entry["message"]
+            best = entry["best"]
+            counted_count += 1 if entry["counted"] else 0
+            conn.execute(
+                "INSERT INTO review_messages ("
+                "review_id, target_utc, seq, issued_utc, received_utc, level_cm, "
+                "counted, effective, active, timer_start_received_utc, "
+                "best_issued_utc, best_received_utc, best_level_cm, note"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    review_id,
+                    target_utc,
+                    seq,
+                    message.issued_utc,
+                    message.received_utc,
+                    message.level_cm,
+                    1 if entry["counted"] else 0,
+                    1 if entry["effective"] else 0,
+                    1 if entry["active"] else 0,
+                    entry["timer_start_received_utc"],
+                    None if best is None else best.issued_utc,
+                    None if best is None else best.received_utc,
+                    None if best is None else best.level_cm,
+                    entry["note"],
+                ),
+            )
+        conn.execute(
+            "INSERT INTO review_message_targets "
+            "(review_id, target_utc, message_count, counted_count) "
+            "VALUES (?, ?, ?, ?)",
+            (review_id, target_utc, len(entries), counted_count),
+        )
+        total += len(entries)
+    return total
+
+
+def rebuild_message_index(conn, review_id: int) -> int | None:
+    """Backfill the paged-browsing index for a review frozen before it existed.
+
+    Reads only the review's own frozen snapshot; the stored results are
+    untouched.  Returns the number of indexed messages, or ``None`` when the
+    review does not exist.
+    """
+    review = conn.execute("SELECT * FROM reviews WHERE id = ?", (review_id,)).fetchone()
+    if review is None:
+        return None
+    rows = conn.execute(
+        "SELECT target_utc, issued_utc, received_utc, level_cm FROM review_forecasts "
+        "WHERE review_id = ? ORDER BY target_utc, received_utc, issued_utc",
+        (review_id,),
+    ).fetchall()
+    messages = [Message(**row) for row in rows]
+    with db.transaction(conn):
+        conn.execute("DELETE FROM review_messages WHERE review_id = ?", (review_id,))
+        conn.execute(
+            "DELETE FROM review_message_targets WHERE review_id = ?", (review_id,)
+        )
+        total = build_message_index(conn, review_id, messages, review["threshold_cm"])
+        conn.execute(
+            "UPDATE reviews SET messages_ready = 1 WHERE id = ?", (review_id,)
+        )
+    return total
+
+
+def load_review_summary(conn, review_id: int) -> dict | None:
+    """Review row plus its stored results — snapshot messages are not read."""
     review = conn.execute("SELECT * FROM reviews WHERE id = ?", (review_id,)).fetchone()
     if review is None:
         return None
@@ -325,6 +418,13 @@ def load_review(conn, review_id: int) -> dict | None:
         "SELECT * FROM review_results WHERE review_id = ? ORDER BY hour_utc",
         (review_id,),
     ).fetchall()
+    return review
+
+
+def load_review(conn, review_id: int) -> dict | None:
+    review = load_review_summary(conn, review_id)
+    if review is None:
+        return None
     review["messages"] = conn.execute(
         "SELECT * FROM review_forecasts WHERE review_id = ? "
         "ORDER BY target_utc, received_utc, issued_utc",
@@ -337,6 +437,173 @@ def load_review(conn, review_id: int) -> dict | None:
     return review
 
 
+def message_page(
+    conn,
+    review_id: int,
+    target_utc: str,
+    *,
+    start_received_utc: str | None = None,
+    from_seq: int | None = None,
+    anchor_seq: int | None = None,
+    limit: int = 100,
+) -> dict:
+    """One page of the frozen message timeline for a crossing hour.
+
+    Reads stay proportional to the page size no matter how large the snapshot
+    is: the receive-start second is resolved with one index seek, the page is
+    a primary-key range scan of at most ``limit`` rows, the state shown at the
+    top of the page is the single row at ``first_seq - 1``, and the totals
+    come from the precomputed per-target row.
+
+    ``anchor_seq`` is the seq the browsing session started from; pages advance
+    in steps of ``limit`` from that anchor, so following the prev/next links
+    never repeats or skips a message.
+    """
+    start_beyond = False
+    if from_seq is None:
+        if start_received_utc is None:
+            from_seq = 1
+        else:
+            row = conn.execute(
+                "SELECT seq FROM review_messages "
+                "WHERE review_id = ? AND target_utc = ? AND received_utc >= ? "
+                "ORDER BY received_utc ASC, issued_utc DESC LIMIT 1",
+                (review_id, target_utc, start_received_utc),
+            ).fetchone()
+            if row is None:
+                from_seq = 1
+                start_beyond = True
+            else:
+                from_seq = row["seq"]
+    if anchor_seq is None:
+        anchor_seq = from_seq
+    rows = []
+    if not start_beyond:
+        rows = conn.execute(
+            "SELECT * FROM review_messages "
+            "WHERE review_id = ? AND target_utc = ? AND seq >= ? "
+            "ORDER BY seq LIMIT ?",
+            (review_id, target_utc, from_seq, limit),
+        ).fetchall()
+    before = None
+    if rows and rows[0]["seq"] > 1:
+        before = conn.execute(
+            "SELECT * FROM review_messages "
+            "WHERE review_id = ? AND target_utc = ? AND seq = ?",
+            (review_id, target_utc, rows[0]["seq"] - 1),
+        ).fetchone()
+    counts = conn.execute(
+        "SELECT message_count, counted_count FROM review_message_targets "
+        "WHERE review_id = ? AND target_utc = ?",
+        (review_id, target_utc),
+    ).fetchone()
+    total = counts["message_count"] if counts else 0
+    first_seq = rows[0]["seq"] if rows else None
+    last_seq = rows[-1]["seq"] if rows else None
+    prev_seq = None
+    if first_seq is not None and first_seq > anchor_seq:
+        prev_seq = max(anchor_seq, first_seq - limit)
+    return {
+        "rows": rows,
+        "before": before,
+        "total": total,
+        "counted": counts["counted_count"] if counts else 0,
+        "first_seq": first_seq,
+        "last_seq": last_seq,
+        "anchor_seq": anchor_seq,
+        "next_seq": last_seq + 1 if last_seq is not None and last_seq < total else None,
+        "prev_seq": prev_seq,
+        "start_beyond": start_beyond,
+    }
+
+
+def timeline_effects(
+    messages: list[Message],
+    threshold_cm: float,
+    cutoff: datetime,
+) -> list[dict]:
+    """Canonical per-message timeline for one target hour.
+
+    Entries are ordered by reception, newest issue first within the same
+    second.  Messages received after ``cutoff`` keep their place at the end,
+    are flagged ``counted=False`` and never move the warning timer; they still
+    carry the state forward, so the state right *before* any position is the
+    state stored on the previous entry.  Each entry holds:
+
+    ``message``   the Message itself
+    ``counted``   received at/before the cutoff
+    ``effective`` became the watch-desk authority when processed
+    ``active``    warning timer running after this entry
+    ``timer_start_received_utc``  start of the still-running timer, if any
+    ``best``      authority Message after this entry (or None)
+    ``note``      human readable effect, identical wherever it is shown
+    """
+    counted = [m for m in messages if m.received <= cutoff]
+    late = [m for m in messages if m.received > cutoff]
+    counted.sort(key=lambda m: (m.received, -_seconds_since_epoch(m.issued)))
+    late.sort(key=lambda m: (m.received, -_seconds_since_epoch(m.issued)))
+
+    entries: list[dict] = []
+    best: Message | None = None
+    active = False
+    timer_start: str | None = None
+
+    def state() -> dict:
+        return {
+            "active": active,
+            "timer_start_received_utc": timer_start,
+            "best": best,
+        }
+
+    for message in counted:
+        # The watch desk keeps whatever was issued most recently; a stale
+        # message arriving late changes nothing.
+        if best is not None and message.issued <= best.issued:
+            entries.append(
+                {
+                    "message": message,
+                    "counted": True,
+                    "effective": False,
+                    "note": "签发时刻不晚于已生效报文，忽略",
+                    **state(),
+                }
+            )
+            continue
+        best = message
+        was_active = active
+        active = message.level_cm >= threshold_cm
+        if active and not was_active:
+            timer_start = message.received_utc
+            note = "达到/高于警戒线：开始计时"
+        elif active:
+            note = "持续高于警戒线"
+        elif was_active:
+            timer_start = None
+            note = "跌破警戒线：取消预警计时"
+        else:
+            note = "低于警戒线"
+        entries.append(
+            {
+                "message": message,
+                "counted": True,
+                "effective": True,
+                "note": note,
+                **state(),
+            }
+        )
+    for message in late:
+        entries.append(
+            {
+                "message": message,
+                "counted": False,
+                "effective": False,
+                "note": "越线后才收到，不计入",
+                **state(),
+            }
+        )
+    return entries
+
+
 def trace_for_hour(review: dict, hour_utc: str, threshold_cm: float) -> list[dict]:
     """Human readable timeline of effective forecasts, from the snapshot only."""
     messages = [
@@ -347,34 +614,11 @@ def trace_for_hour(review: dict, hour_utc: str, threshold_cm: float) -> list[dic
             level_cm=row["level_cm"],
         )
         for row in review["messages"]
+        if row["target_utc"] == hour_utc
     ]
     target = times.parse_stored(hour_utc)
-    relevant = [m for m in messages if m.target_utc == hour_utc and m.received <= target]
-    # Reception order; simultaneous arrivals show the newest issue first.
-    relevant.sort(key=lambda m: (m.received, -_seconds_since_epoch(m.issued)))
-    trace: list[dict] = []
-    best: Message | None = None
-    for message in relevant:
-        if best is not None and message.issued <= best.issued:
-            trace.append(
-                {
-                    "message": message,
-                    "effective": False,
-                    "active": bool(trace and trace[-1]["active"]),
-                    "note": "签发时刻不晚于已生效报文，忽略",
-                }
-            )
-            continue
-        was_active = bool(trace and trace[-1]["active"])
-        best = message
-        active = message.level_cm >= threshold_cm
-        if active and not was_active:
-            note = "达到/高于警戒线：开始计时"
-        elif active:
-            note = "持续高于警戒线"
-        elif was_active:
-            note = "跌破警戒线：取消预警计时"
-        else:
-            note = "低于警戒线"
-        trace.append({"message": message, "effective": True, "active": active, "note": note})
-    return trace
+    return [
+        entry
+        for entry in timeline_effects(messages, threshold_cm, target)
+        if entry["counted"]
+    ]

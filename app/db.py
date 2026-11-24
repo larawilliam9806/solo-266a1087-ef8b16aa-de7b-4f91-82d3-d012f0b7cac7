@@ -57,7 +57,11 @@ CREATE TABLE IF NOT EXISTS reviews (
     note              TEXT    NOT NULL DEFAULT '',
     created_utc       TEXT    NOT NULL,
     forecast_count    INTEGER NOT NULL DEFAULT 0,
-    observation_count INTEGER NOT NULL DEFAULT 0
+    observation_count INTEGER NOT NULL DEFAULT 0,
+    -- 1 once the per-message jump index (review_messages) has been built.
+    -- New reviews set it inside the creation transaction, so a review only
+    -- becomes visible in the list when its messages can be paged.
+    messages_ready    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS review_forecasts (
@@ -95,6 +99,45 @@ CREATE TABLE IF NOT EXISTS review_results (
     messages_late         INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (review_id, hour_utc)
 );
+
+-- Materialised per-target message timeline for paged browsing.  ``seq``
+-- numbers the messages of one target hour 1..N in canonical order (received
+-- ascending, newest issue first within the same second), so a page is a
+-- primary-key range scan and the state shown at the top of a page is the
+-- single row at ``seq - 1``.  ``active`` / ``timer_start_received_utc`` /
+-- ``best_*`` describe the state *after* the row is processed; late rows
+-- (received after the crossing hour) carry that state forward unchanged so
+-- the lookup stays one indexed read no matter where the page starts.
+CREATE TABLE IF NOT EXISTS review_messages (
+    review_id     INTEGER NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+    target_utc    TEXT    NOT NULL,
+    seq           INTEGER NOT NULL,
+    issued_utc    TEXT    NOT NULL,
+    received_utc  TEXT    NOT NULL,
+    level_cm      REAL    NOT NULL,
+    counted       INTEGER NOT NULL,   -- 1 = 越线前到报（计入）, 0 = 越线后到报（不计入）
+    effective     INTEGER NOT NULL,   -- 1 = 成为当时最新生效报文
+    active        INTEGER NOT NULL,   -- 处理后预警是否仍在计时
+    timer_start_received_utc TEXT,    -- 处理后仍在计时的预警起点（接收时刻）
+    best_issued_utc   TEXT,           -- 处理后最新生效报文（签发/接收/潮位）
+    best_received_utc TEXT,
+    best_level_cm     REAL,
+    note          TEXT    NOT NULL,   -- 该报文对计时的影响（与从头查看一致）
+    PRIMARY KEY (review_id, target_utc, seq)
+);
+
+-- Resolves a UTC receive start second to the first seq at/after it.
+CREATE INDEX IF NOT EXISTS idx_review_messages_received
+    ON review_messages (review_id, target_utc, received_utc);
+
+-- Per-target totals, so a page header never has to COUNT the messages.
+CREATE TABLE IF NOT EXISTS review_message_targets (
+    review_id     INTEGER NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+    target_utc    TEXT    NOT NULL,
+    message_count INTEGER NOT NULL,
+    counted_count INTEGER NOT NULL,
+    PRIMARY KEY (review_id, target_utc)
+);
 """
 
 
@@ -123,8 +166,22 @@ def init_db(db_path: str | Path) -> None:
     conn = connect(db_path)
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
     finally:
         conn.close()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring databases created by older versions up to the current schema.
+
+    New tables are covered by ``CREATE TABLE IF NOT EXISTS``; columns added to
+    pre-existing tables need an explicit ``ALTER TABLE`` here.
+    """
+    review_cols = {row["name"] for row in conn.execute("PRAGMA table_info(reviews)")}
+    if "messages_ready" not in review_cols:
+        conn.execute(
+            "ALTER TABLE reviews ADD COLUMN messages_ready INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 @contextmanager

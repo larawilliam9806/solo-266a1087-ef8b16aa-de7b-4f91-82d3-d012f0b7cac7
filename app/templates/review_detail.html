@@ -46,6 +46,7 @@
           <th class="num">提前<br>分钟</th>
           <th class="num">越线前<br>最新预报</th>
           <th>说明</th>
+          {% if review.messages_ready %}<th>报文</th>{% endif %}
         </tr>
       </thead>
       <tbody>
@@ -101,6 +102,15 @@
                 <div class="sub">提前 {{ row.lead_minutes }} 分钟</div>
               {% endif %}
             </td>
+            {% if review.messages_ready %}
+              <td>
+                {% if row.status == 'crossing' %}
+                  <a class="link" href="{{ url_for('review_messages', review_id=review.id, hour=row.hour_utc) }}">跳查</a>
+                {% else %}
+                  <span class="muted">—</span>
+                {% endif %}
+              </td>
+            {% endif %}
           </tr>
         {% endfor %}
       </tbody>
@@ -111,55 +121,45 @@
   {% endif %}
 </section>
 
-{% if traces %}
 <section class="card">
-  <h2>逐时预警生效过程</h2>
-  <p class="hint">只展示目标为该越线整点、且在越线整点前已接收的报文。值班端始终以"当时已收到的最新签发"为准。</p>
-  <div class="traces">
-    {% for hour, items in traces.items() %}{% if loop.index <= 40 %}
-      <details class="trace">
-        <summary class="mono">{{ hour|dt }} <span class="muted">（{{ items|length }} 条已接收报文）</span></summary>
-        <ol class="timeline">
-          {% for item in items %}
-            <li class="{{ 'active' if item.active else 'inactive' }} {{ 'ignored' if not item.effective }}">
-              <span class="mono t-recv">{{ item.message.received_utc|dt }}</span>
-              <span class="tag">收到</span>
-              <span class="mono">签发 {{ item.message.issued_utc|dt }}</span>
-              <span class="level">{{ item.message.level_cm|cm }} cm</span>
-              <span class="t-note">{{ item.note }}</span>
-            </li>
-          {% endfor %}
-        </ol>
-      </details>
-    {% endif %}{% endfor %}
-  </div>
-  {% if trace_total > trace_limit %}
-    <p class="hint">共 {{ trace_total }} 个越线整点，这里只展开前 {{ trace_limit }} 个的过程；完整数据见上方清单与导出的 CSV。</p>
-  {% endif %}
-</section>
-{% endif %}
-
-<section class="card">
-  <h2>本次快照使用的报文</h2>
-  {% if review.messages %}
-    <div class="table-wrap">
-      <table class="table">
-        <thead><tr><th>目标整点</th><th>签发时刻</th><th>接收时刻</th><th class="num">潮位</th><th>是否参与</th></tr></thead>
-        <tbody>
-          {% for m in review.messages %}
-            <tr>
-              <td class="mono">{{ m.target_utc|dt }}</td>
-              <td class="mono">{{ m.issued_utc|dt }}</td>
-              <td class="mono">{{ m.received_utc|dt }}</td>
-              <td class="num">{{ m.level_cm|cm }}</td>
-              <td class="hint">{{ '越线前已收到' if m.received_utc <= m.target_utc else '越线后才收到，不计入' }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
+  <h2>报文跳查</h2>
+  {% if review.messages_ready %}
+    {% if crossing_hours %}
+      <p class="hint">
+        选择越线整点并填写 UTC 接收起点（如交接班时刻），从该秒起逐页查看本次快照中的报文：
+        按接收时刻升序、同秒较新签发在前，每页最多 100 条；起点留空则从首条报文开始。
+        页首会标出首条报文处理前的最新生效报文与仍在计时的预警起点。
+      </p>
+      <form method="get" action="{{ url_for('review_messages', review_id=review.id) }}" class="form">
+        <div class="field-row">
+          <div class="field">
+            <label for="hour">越线整点（UTC）</label>
+            <select id="hour" name="hour">
+              {% for h in crossing_hours %}
+                {% set t = message_targets.get(h) %}
+                <option value="{{ h }}">{{ h|dt }}{% if t %}（{{ t.message_count }} 条报文）{% else %}（无报文）{% endif %}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label for="start">UTC 接收起点（可留空）</label>
+            <input id="start" name="start" type="text" class="mono"
+                   placeholder="例如 2026-05-01 08:00:00" autocomplete="off">
+          </div>
+        </div>
+        <button type="submit" class="btn primary">从该秒起查看报文</button>
+      </form>
+    {% else %}
+      <p class="empty">本次回查没有越线整点，无报文可查。</p>
+    {% endif %}
   {% else %}
-    <p class="empty">快照中没有目标为这些越线整点的预报报文。</p>
+    <p class="hint">
+      该回查建于报文跳查功能之前，快照报文尚未建立跳查索引。
+      可从原快照补建一次；越线结果与 CSV 导出不受影响，仍可照常查看。
+    </p>
+    <form method="post" action="{{ url_for('review_rebuild_messages', review_id=review.id) }}" class="inline-form">
+      <button type="submit" class="btn primary">从快照补建报文索引</button>
+    </form>
   {% endif %}
 </section>
 {% endblock %}
